@@ -14,7 +14,7 @@ class UserScore(BaseModel):
 
 @app.get("/")
 def read_root():
-    return {"message": "Hello from FastAPI on Railway!"}
+    return {"message": "Hello from FastAPI on Railway with Docker!"}
 
 # Эндпоинт для получения счёта пользователя
 @app.get("/user_score")
