@@ -1,59 +1,67 @@
 import os
-import logging
-import asyncio
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
-from aiogram.types import Message
-import requests
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from sqlalchemy import create_engine, Column, Integer, String, MetaData, Table
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker
+from fastapi.middleware.cors import CORSMiddleware
 
-logging.basicConfig(level=logging.INFO)
+DATABASE_URL = os.getenv("DATABASE_URL").replace("postgres://", "postgresql+asyncpg://", 1)
 
-API_TOKEN = os.getenv('TELEGRAM_TOKEN')
-API_URL = "https://servercurwa-production.up.railway.app"
-GAME_URL = "https://notafive5.github.io/BoberCurwa/"
+metadata = MetaData()
 
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher()
+scores = Table(
+    "scores",
+    metadata,
+    Column("id", Integer, primary_key=True, index=True),
+    Column("user_id", String, index=True),
+    Column("score", Integer, default=0),
+)
 
-@dp.message(Command("start"))
-async def start_command(message: Message):
-    await message.answer(
-        f'Привет! Нажми на ссылку, чтобы играть: [Играть в FLAPPY BOBR]({GAME_URL})',
-        parse_mode="Markdown"
-    )
+engine = create_async_engine(DATABASE_URL, echo=True)
+async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-@dp.message(Command("score"))
-async def send_score(message: Message):
-    user_id = message.from_user.id
-    try:
-        response = requests.get(f'{API_URL}/api/user_score?user_id={user_id}')
-        if response.status_code == 200:
-            score = response.json().get('score', 0)
-            await message.answer(f'Ваш текущий счёт: {score} очков!')
-        else:
-            await message.answer('Не удалось получить ваш счёт. Попробуйте позже.')
-    except Exception as e:
-        logging.error(e)
-        await message.answer('Произошла ошибка при получении счёта.')
+app = FastAPI()
 
-@dp.message(Command("top"))
-async def send_leaderboard(message: Message):
-    try:
-        response = requests.get(f'{API_URL}/api/leaderboard')
-        if response.status_code == 200:
-            leaderboard = response.json().get('leaderboard', [])
-            leaderboard_text = '🏆 Таблица лидеров:\n'
-            for idx, entry in enumerate(leaderboard, start=1):
-                leaderboard_text += f'{idx}. {entry["username"]}: {entry["score"]} очков\n'
-            await message.answer(leaderboard_text)
-        else:
-            await message.answer('Не удалось загрузить таблицу лидеров. Попробуйте позже.')
-    except Exception as e:
-        logging.error(e)
-        await message.answer('Произошла ошибка при загрузке таблицы лидеров.')
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-async def main():
-    await dp.start_polling(bot)
+class Score(BaseModel):
+    user_id: str
+    score: int
 
-if __name__ == "__main__":
-    asyncio.run(main())
+@app.on_event("startup")
+async def startup():
+    async with engine.begin() as conn:
+        await conn.run_sync(metadata.create_all)
+
+@app.post("/api/score")
+async def submit_score(score: Score):
+    async with async_session() as session:
+        query = scores.insert().values(user_id=score.user_id, score=score.score)
+        await session.execute(query)
+        await session.commit()
+    return {"message": "Score submitted successfully!"}
+
+@app.get("/api/user_score")
+async def get_user_score(user_id: str):
+    async with async_session() as session:
+        query = scores.select().where(scores.c.user_id == user_id)
+        result = await session.execute(query)
+        user_score = result.fetchone()
+        if not user_score:
+            raise HTTPException(status_code=404, detail="User score not found")
+        return {"score": user_score.score}
+
+@app.get("/api/leaderboard")
+async def get_leaderboard():
+    async with async_session() as session:
+        query = scores.select().order_by(scores.c.score.desc()).limit(10)
+        result = await session.execute(query)
+        leaderboard = [{"username": row.user_id, "score": row.score} for row in result]
+        return {"leaderboard": leaderboard}
